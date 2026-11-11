@@ -4,7 +4,7 @@ A [Playnite](https://playnite.link/) plugin for [Ludusavi](https://github.com/mt
 
 ## 支持 Goldberg 模拟器游戏
 
-原版插件只能识别从 Steam 库导入的游戏（通过 `game.Source == "Steam"` 获取 AppID）。对于手动添加到 Playnite 的游戏——尤其是 Goldberg 模拟器（Goldberg Emulator）打包的破解/移植版本——插件无法获取 Steam AppID，导致名字匹配失败时无法兜底。
+原版插件只能识别从 Steam 库导入的游戏（通过 `game.Source == "Steam"` 获取 AppID）。对于手动添加到 Playnite 的游戏——尤其是打过Goldberg 模拟器补丁的版本——插件无法获取 Steam AppID，导致名字匹配失败时无法兜底。
 
 本 fork 在插件端实现了与 Ludusavi 本体一致的 AppID 检测逻辑，当游戏不是从 Steam 导入时，自动从游戏安装目录递归探测 `steam_appid.txt` 和 ini 配置文件，获取 Steam AppID 后传给 `ludusavi find --steam-id` 做兜底匹配。
 
