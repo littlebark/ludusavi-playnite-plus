@@ -1,6 +1,58 @@
-# Ludusavi for Playnite
-This project is a [Playnite](https://playnite.link) plugin
-to back up your save data using [Ludusavi](https://github.com/mtkennerly/ludusavi).
+# Ludusavi Playnite Plus
+
+A [Playnite](https://playnite.link/) plugin for [Ludusavi](https://github.com/mtkennerly/ludusavi), forked from [mtkennerly/ludusavi-playnite](https://github.com/mtkennerly/ludusavi-playnite).
+
+## 支持 Goldberg 模拟器游戏
+
+原版插件只能识别从 Steam 库导入的游戏（通过 `game.Source == "Steam"` 获取 AppID）。对于手动添加到 Playnite 的游戏——尤其是 Goldberg 模拟器（Goldberg Emulator）打包的破解/移植版本——插件无法获取 Steam AppID，导致名字匹配失败时无法兜底。
+
+本 fork 在插件端实现了与 Ludusavi 本体一致的 AppID 检测逻辑，当游戏不是从 Steam 导入时，自动从游戏安装目录递归探测 `steam_appid.txt` 和 ini 配置文件，获取 Steam AppID 后传给 `ludusavi find --steam-id` 做兜底匹配。
+
+### 检测层级
+
+完全对齐 Ludusavi 本体 `detect_steam_appid()` 的 5 层 fallback：
+
+1. **直接文件**：`<安装目录>/steam_appid.txt`
+2. **steam_settings 子目录**：`<安装目录>/steam_settings/steam_appid.txt`
+3. **递归搜索**：向下最多 8 层查找 `steam_appid.txt`，跳过隐藏目录（`.`开头）和 `$` 开头的目录
+4. **ini 配置文件**：
+   - 向上搜索 5 层目录
+   - 向下递归搜索 6 层
+   - 识别 `SteamConfig.ini`、`SmartSteamEmu.ini`、`flt.ini` 中的 `AppID=123456` 格式
+   - 同时检查每层的 `steam_appid.txt` 和 `steam_settings/steam_appid.txt`
+5. **路径末尾数字**：如果文件夹名以数字结尾（如 `game/2288630`），取该数字作为 AppID（过滤 <10000 防误判）
+
+### 工作流程
+
+```
+Playnite 启动游戏
+  ↓
+插件调用 ludusavi find "游戏名" --steam-id <探测到的AppID>
+  ↓
+  ├─ 名字匹配成功 → 直接用匹配结果
+  └─ 名字匹配失败 → 用 --steam-id 反查 manifest 找到官方游戏名
+  ↓
+插件调用 ludusavi backup "官方游戏名"
+```
+
+这样即使 Playnite 里的游戏名是中文、带括号副标题、或与 manifest 官方名不一致，插件也能通过 AppID 兜底找到正确的存档路径。
+
+### 改动文件
+
+仅修改了 `src/Etc.cs` 中的 `SteamId()` 方法及辅助函数，不影响原版任何功能。
+
+| 函数 | 说明 |
+|---|---|
+| `SteamId()` | 重写：非 Steam 来源游戏增加安装目录 AppID 探测 |
+| `TryReadAppId()` | 读取并校验 steam_appid.txt |
+| `SearchFileRecursive()` | 有限深度递归搜索 steam_appid.txt |
+| `ReadAppIdFromIniAt()` | 从指定目录读 ini 配置中的 AppID |
+| `AppIdFromConfig()` | 向上5层 + 向下6层搜索 ini 配置 |
+| `SearchIniRecursive()` | ini 文件递归搜索 |
+
+---
+
+以下为原版 README 内容：
 
 ## Features
 * Known save locations for more than 10,000 games.
@@ -132,3 +184,9 @@ The following tags are only informational and do not have special behavior:
 
 ## Development
 Please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## 致谢
+
+- [mtkennerly/ludusavi-playnite](https://github.com/mtkennerly/ludusavi-playnite) — 原版插件
+- [mtkennerly/ludusavi](https://github.com/mtkennerly/ludusavi) — 存档备份工具本体
+- [Goldberg Steam Emulator](https://gitlab.com/Mr_Goldberg/goldberg_emulator) — 让非 Steam 游戏也有 steam_appid.txt
