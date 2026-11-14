@@ -2,25 +2,22 @@
 
 A [Playnite](https://playnite.link/) plugin for [Ludusavi](https://github.com/mtkennerly/ludusavi), forked from [mtkennerly/ludusavi-playnite](https://github.com/mtkennerly/ludusavi-playnite).
 
-## 支持 Goldberg 模拟器游戏
+## 支持 Goldberg / RUNE 模拟器游戏
 
-原版插件只能识别从 Steam 库导入的游戏（通过 `game.Source == "Steam"` 获取 AppID）。对于手动添加到 Playnite 的游戏——尤其是打过Goldberg 模拟器补丁的版本——插件无法获取 Steam AppID，导致名字匹配失败时无法兜底。
+原版插件只能识别从 Steam 库导入的游戏（通过 `game.Source == "Steam"` 获取 AppID）。对于手动添加到 Playnite 的游戏——尤其是打过 Goldberg、RUNE 等模拟器补丁的版本——插件无法获取 Steam AppID，导致名字匹配失败时无法兜底。
 
-本 fork 在插件端实现了与 Ludusavi 本体一致的 AppID 检测逻辑，当游戏不是从 Steam 导入时，自动从游戏安装目录递归探测 `steam_appid.txt` 和 ini 配置文件，获取 Steam AppID 后传给 `ludusavi find --steam-id` 做兜底匹配。
+本 fork 在插件端实现了与 Ludusavi 本体一致的 AppID 检测逻辑，当游戏不是从 Steam 导入时，自动从游戏安装目录探测 Steam AppID，再传给 `ludusavi find --steam-id` 做兜底匹配。
 
-### 检测层级
+### 检测规则
 
-完全对齐 Ludusavi 本体 `detect_steam_appid()` 的 5 层 fallback：
+对齐 Ludusavi 本体的 `detect_steam_appid()`，4 路 fallback：
 
-1. **直接文件**：`<安装目录>/steam_appid.txt`
-2. **steam_settings 子目录**：`<安装目录>/steam_settings/steam_appid.txt`
-3. **递归搜索**：向下最多 8 层查找 `steam_appid.txt`，跳过隐藏目录（`.`开头）和 `$` 开头的目录
-4. **ini 配置文件**：
-   - 向上搜索 5 层目录
-   - 向下递归搜索 6 层
-   - 识别 `SteamConfig.ini`、`SmartSteamEmu.ini`、`flt.ini` 中的 `AppID=123456` 格式
-   - 同时检查每层的 `steam_appid.txt` 和 `steam_settings/steam_appid.txt`
-5. **路径末尾数字**：如果文件夹名以数字结尾（如 `game/2288630`），取该数字作为 AppID（过滤 <10000 防误判）
+1. **`steam_appid.txt`**：先在安装目录和 `steam_settings/` 下查；找不到则按文件名全树搜索（不限深度），命中多个时优先路径最浅的那个
+2. **`steam_emu.ini` / `rune.ini`**：RUNE 等模拟器不生成 `steam_appid.txt`，AppID 写在 ini 的 `AppId=` 行，且常埋在任意深度（如 UE 的 `Engine/Binaries/.../Win64/`）。全树搜索，并优先取与 `steam_api.dll` / `steam_api64.dll` 同目录的那份
+3. **其他模拟器配置**：全树搜索 `SteamConfig.ini`、`SmartSteamEmu.ini`、`flt.ini`、`steam_appid.txt`，匹配 `AppID=123456`、`AppId = 123456` 或裸数字行
+4. **路径末尾数字**：路径最后一段以数字结尾时（如 `.../2288630`）取该数字，会先剥掉 `\stats`、`\SteamEmu`、`\SteamEmu\UserStats` 后缀
+
+全树搜索的约束：跳过 `node_modules`、`.git`、`.svn`、`.hg`、`__MACOSX`；单次扫描上限 20 万个目录项；不跟随符号链接目录。
 
 ### 工作流程
 
@@ -44,11 +41,12 @@ Playnite 启动游戏
 | 函数 | 说明 |
 |---|---|
 | `SteamId()` | 重写：非 Steam 来源游戏增加安装目录 AppID 探测 |
-| `TryReadAppId()` | 读取并校验 steam_appid.txt |
-| `SearchFileRecursive()` | 有限深度递归搜索 steam_appid.txt |
-| `ReadAppIdFromIniAt()` | 从指定目录读 ini 配置中的 AppID |
-| `AppIdFromConfig()` | 向上5层 + 向下6层搜索 ini 配置 |
-| `SearchIniRecursive()` | ini 文件递归搜索 |
+| `DetectSteamAppId()` | 4 路 fallback 主入口 |
+| `FindFiles()` / `WalkFiles()` | 按文件名全树搜索（不限深度，跳过无关目录，上限 20 万条目） |
+| `DetectGameAppId()` | `steam_appid.txt`，浅层优先、其次全树取最浅 |
+| `ReadAppIdFromEmuIni()` | `steam_emu.ini` / `rune.ini`，优先与 `steam_api*.dll` 同目录 |
+| `AppIdFromConfig()` | `SteamConfig.ini` / `SmartSteamEmu.ini` / `flt.ini` 全树搜索 |
+| `AppIdFromPath()` | 路径末尾数字，剥离 SteamEmu 统计目录后缀 |
 
 ---
 
