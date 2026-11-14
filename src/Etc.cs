@@ -108,172 +108,281 @@ namespace LudusaviPlaynite
                 return null;
             }
 
-            var root = game.InstallDirectory;
-
-            // 1. Direct file in install root
-            if (TryReadAppId(root, "steam_appid.txt", out id))
-            {
-                return id;
-            }
-
-            // 2. steam_settings subfolder
-            if (TryReadAppId(Path.Combine(root, "steam_settings"), "steam_appid.txt", out id))
-            {
-                return id;
-            }
-
-            // 3. Recurse up to depth 8 for steam_appid.txt (skip hidden/$ dirs)
-            var found = SearchFileRecursive(root, "steam_appid.txt", 0, 8);
-            if (found.HasValue)
-            {
-                return found;
-            }
-
-            // 4. Ini-based detection (SmartSteamEmu/SSE/flt)
-            found = AppIdFromConfig(root);
-            if (found.HasValue)
-            {
-                return found;
-            }
-
-            // 5. Trailing number in folder name
-            var dirName = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar));
-            var m = Regex.Match(dirName, @"(\d+)$");
-            if (m.Success && int.TryParse(m.Groups[1].Value, out var tailId) && tailId > 10000)
-            {
-                return tailId;
-            }
-
-            return null;
+            return DetectSteamAppId(game.InstallDirectory);
         }
 
-        private static bool TryReadAppId(string dir, string fileName, out int appId)
+        // Mirrors `detectSteamGame()` from `detect-steam-game.mjs`:
+        // 1. steam_appid.txt (shallow first, then anywhere in the tree, shallowest wins).
+        // 2. steam_emu.ini / rune.ini (RUNE-style emulators), preferring the one next to steam_api*.dll.
+        // 3. Other emulator configs (SteamConfig.ini, SmartSteamEmu.ini, flt.ini, steam_appid.txt).
+        // 4. Trailing number in the path.
+        private static int? DetectSteamAppId(string gameDir)
         {
-            appId = 0;
-            try
+            return DetectGameAppId(gameDir)
+                ?? ReadAppIdFromEmuIni(gameDir)
+                ?? AppIdFromConfig(gameDir)
+                ?? AppIdFromPath(gameDir);
+        }
+
+        private static readonly string[] FindSkipDirs =
+            { "node_modules", ".git", ".svn", ".hg", "__MACOSX" };
+
+        private const int FindMaxFiles = 200000;
+
+        private static bool IsSkippedDir(string name)
+        {
+            foreach (var skipped in FindSkipDirs)
             {
-                var path = Path.Combine(dir, fileName);
-                if (File.Exists(path))
+                if (string.Equals(skipped, name, StringComparison.OrdinalIgnoreCase))
                 {
-                    var content = File.ReadAllText(path).Trim();
-                    if (int.TryParse(content, out var id) && id > 0)
-                    {
-                        appId = id;
-                        return true;
-                    }
+                    return true;
                 }
             }
-            catch { }
             return false;
         }
 
-        private static int? SearchFileRecursive(string dir, string fileName, int depth, int maxDepth)
+        /// <summary>
+        /// Full-tree search by file name, with no depth limit.
+        /// Skips irrelevant directories, stops after FindMaxFiles entries,
+        /// and does not recurse into symlinked directories.
+        /// </summary>
+        private static List<string> FindFiles(string root, params string[] fileNames)
         {
-            if (depth >= maxDepth) return null;
+            var results = new List<string>();
+            var state = new int[] { 0 };
+            WalkFiles(root, fileNames, results, state);
+            return results;
+        }
 
-            string[] subDirs;
-            try { subDirs = Directory.GetDirectories(dir); }
-            catch { return null; }
-
-            foreach (var sub in subDirs)
+        private static void WalkFiles(string dir, string[] fileNames, List<string> results, int[] state)
+        {
+            if (state[0] > FindMaxFiles)
             {
-                var name = Path.GetFileName(sub);
-                if (name.StartsWith(".") || name.StartsWith("$")) continue;
+                return;
+            }
 
-                var file = Path.Combine(sub, fileName);
-                if (File.Exists(file))
+            string[] entries;
+            try { entries = Directory.GetFileSystemEntries(dir); }
+            catch { return; }
+
+            foreach (var entry in entries)
+            {
+                state[0]++;
+                if (state[0] > FindMaxFiles)
                 {
+                    return;
+                }
+
+                var name = Path.GetFileName(entry);
+
+                if (Directory.Exists(entry))
+                {
+                    if (IsSkippedDir(name))
+                    {
+                        continue;
+                    }
+
                     try
                     {
-                        var content = File.ReadAllText(file).Trim();
-                        if (int.TryParse(content, out var id) && id > 0)
+                        var attributes = File.GetAttributes(entry);
+                        if ((attributes & FileAttributes.ReparsePoint) != 0)
                         {
-                            return id;
+                            continue;
                         }
                     }
-                    catch { }
+                    catch { continue; }
+
+                    WalkFiles(entry, fileNames, results, state);
                 }
-
-                var result = SearchFileRecursive(sub, fileName, depth + 1, maxDepth);
-                if (result.HasValue) return result;
-            }
-
-            return null;
-        }
-
-        private static readonly Regex AppIdIniRegex =
-            new Regex(@"(?im)^\s*(?:AppID|AppId|appid)\s*=\s*(\d{3,8})\s*$");
-
-        private static readonly string[] IniFileNames =
-        {
-            "SteamConfig.ini", "SmartSteamEmu.ini", "steam_appid.txt",
-            Path.Combine("steam_settings", "steam_appid.txt"), "flt.ini"
-        };
-
-        private static int? ReadAppIdFromIniAt(string dir)
-        {
-            foreach (var rel in IniFileNames)
-            {
-                var full = Path.Combine(dir, rel);
-                if (!File.Exists(full)) continue;
-
-                string text;
-                try { text = File.ReadAllText(full); }
-                catch { continue; }
-
-                // steam_appid.txt is just a number
-                if (rel.EndsWith("steam_appid.txt"))
+                else
                 {
-                    if (int.TryParse(text.Trim(), out var id) && id > 0)
-                        return id;
-                    continue;
-                }
-
-                var m = AppIdIniRegex.Match(text);
-                if (m.Success && int.TryParse(m.Groups[1].Value, out var id2) && id2 > 0)
-                {
-                    return id2;
+                    foreach (var fileName in fileNames)
+                    {
+                        if (string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            results.Add(entry);
+                            break;
+                        }
+                    }
                 }
             }
-            return null;
         }
 
-        private static int? AppIdFromConfig(string gameDir)
+        /// <summary>Read a file that contains a bare numeric AppID (e.g. steam_appid.txt).</summary>
+        private static int? ReadAppIdNumber(string path)
         {
-            // Search upward 5 levels
-            var cur = gameDir;
-            for (int i = 0; i < 5; i++)
-            {
-                var found = ReadAppIdFromIniAt(cur);
-                if (found.HasValue) return found;
-
-                var parent = Path.GetDirectoryName(cur);
-                if (string.IsNullOrEmpty(parent)) break;
-                cur = parent;
-            }
-
-            // Search downward recursively up to 6 levels
-            return SearchIniRecursive(gameDir, 0, 6);
-        }
-
-        private static int? SearchIniRecursive(string dir, int depth, int maxDepth)
-        {
-            if (depth >= maxDepth) return null;
-
-            var found = ReadAppIdFromIniAt(dir);
-            if (found.HasValue) return found;
-
-            string[] subDirs;
-            try { subDirs = Directory.GetDirectories(dir); }
+            string text;
+            try { text = File.ReadAllText(path); }
             catch { return null; }
 
-            foreach (var sub in subDirs)
+            var trimmed = text.Trim();
+            if (trimmed.Length == 0 || !trimmed.All(char.IsDigit))
             {
-                var name = Path.GetFileName(sub);
-                if (name.StartsWith(".") || name.StartsWith("$")) continue;
+                return null;
+            }
 
-                var result = SearchIniRecursive(sub, depth + 1, maxDepth);
-                if (result.HasValue) return result;
+            int id;
+            if (int.TryParse(trimmed, out id) && id > 0)
+            {
+                return id;
+            }
+            return null;
+        }
+
+        private static readonly Regex AppIdLineRegex =
+            new Regex(@"(?im)^\s*AppId\s*=\s*(\d{3,8})\s*$");
+
+        private static readonly Regex AppIdConfigRegex =
+            new Regex(@"(?im)(?:^\s*(?:AppID|AppId|appid)\s*=\s*|^\s*)(\d{3,8})\s*$");
+
+        private static int? ReadAppIdFromRegex(string path, Regex regex)
+        {
+            string text;
+            try { text = File.ReadAllText(path); }
+            catch { return null; }
+
+            var m = regex.Match(text);
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var id) && id > 0)
+            {
+                return id;
+            }
+            return null;
+        }
+
+        /// <summary>Shallow shortcut: steam_appid.txt in the game directory or its steam_settings subfolder.</summary>
+        private static int? ReadAppIdIn(string dir)
+        {
+            var direct = ReadAppIdNumber(Path.Combine(dir, "steam_appid.txt"));
+            if (direct.HasValue)
+            {
+                return direct;
+            }
+            return ReadAppIdNumber(Path.Combine(dir, "steam_settings", "steam_appid.txt"));
+        }
+
+        /// <summary>1) steam_appid.txt in the game directory, then anywhere in the tree (shallowest first).</summary>
+        private static int? DetectGameAppId(string gameDir)
+        {
+            var direct = ReadAppIdIn(gameDir);
+            if (direct.HasValue)
+            {
+                return direct;
+            }
+
+            var files = FindFiles(gameDir, "steam_appid.txt");
+            if (files.Count == 0)
+            {
+                return null;
+            }
+
+            files.Sort((a, b) =>
+                a.Split(Path.DirectorySeparatorChar).Length.CompareTo(
+                    b.Split(Path.DirectorySeparatorChar).Length));
+
+            foreach (var file in files)
+            {
+                var id = ReadAppIdNumber(file);
+                if (id.HasValue)
+                {
+                    return id;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 2) RUNE and similar emulators don't create steam_appid.txt; the AppID lives in
+        /// steam_emu.ini / rune.ini, possibly buried deep. Prefer the copy next to steam_api*.dll.
+        /// </summary>
+        private static int? ReadAppIdFromEmuIni(string gameDir)
+        {
+            var iniFiles = FindFiles(gameDir, "steam_emu.ini", "rune.ini");
+            if (iniFiles.Count == 0)
+            {
+                return null;
+            }
+
+            var dllDirs = new HashSet<string>(
+                FindFiles(gameDir, "steam_api.dll", "steam_api64.dll")
+                    .Select(f => Path.GetDirectoryName(f).ToLowerInvariant())
+            );
+
+            foreach (var ini in iniFiles)
+            {
+                if (dllDirs.Contains(Path.GetDirectoryName(ini).ToLowerInvariant()))
+                {
+                    var id = ReadAppIdFromRegex(ini, AppIdLineRegex);
+                    if (id.HasValue)
+                    {
+                        return id;
+                    }
+                }
+            }
+
+            foreach (var ini in iniFiles)
+            {
+                var id = ReadAppIdFromRegex(ini, AppIdLineRegex);
+                if (id.HasValue)
+                {
+                    return id;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>3) Upstream config files (SmartSteamEmu / SSE / flt), anywhere in the tree.</summary>
+        private static int? AppIdFromConfig(string gameDir)
+        {
+            var files = FindFiles(
+                gameDir,
+                "SteamConfig.ini",
+                "SmartSteamEmu.ini",
+                "steam_appid.txt",
+                "flt.ini");
+
+            foreach (var file in files)
+            {
+                var id = ReadAppIdFromRegex(file, AppIdConfigRegex);
+                if (id.HasValue)
+                {
+                    return id;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 4) Trailing numeric segment of the path (e.g. .../2288630),
+        /// ignoring the SteamEmu stats folders that some emulators append.
+        /// </summary>
+        private static int? AppIdFromPath(string gameDir)
+        {
+            var s = gameDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            var suffixes = new[]
+            {
+                "\\stats", "/stats",
+                "\\SteamEmu\\UserStats", "/SteamEmu/UserStats",
+                "\\SteamEmu", "/SteamEmu",
+            };
+
+            foreach (var suffix in suffixes)
+            {
+                if (s.Length >= suffix.Length &&
+                    string.Equals(s.Substring(s.Length - suffix.Length), suffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    s = s.Substring(0, s.Length - suffix.Length);
+                    break;
+                }
+            }
+
+            var m = Regex.Match(s, @"(\d+)$");
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var id) && id > 0)
+            {
+                return id;
             }
 
             return null;

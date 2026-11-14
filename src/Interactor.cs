@@ -94,7 +94,39 @@ namespace LudusaviPlaynite
             {
                 return;
             }
-            PlayniteApi.Notifications.Add(new NotificationMessage(Guid.NewGuid().ToString(), message, NotificationType.Info, action));
+            var id = Guid.NewGuid().ToString();
+            PlayniteApi.Notifications.Add(new NotificationMessage(id, message, NotificationType.Info, action));
+            AutoDismiss(id, InfoNotificationLifetimeSeconds);
+        }
+
+        private const int InfoNotificationLifetimeSeconds = 5;
+
+        /// <summary>
+        /// Automatically remove an informational notification after a delay so the user
+        /// does not have to close it manually. Errors are never auto-dismissed.
+        /// </summary>
+        private void AutoDismiss(string notificationId, int seconds)
+        {
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(false);
+                    var dispatcher = Application.Current?.Dispatcher;
+                    if (dispatcher != null)
+                    {
+                        dispatcher.Invoke(() => PlayniteApi.Notifications.Remove(notificationId));
+                    }
+                    else
+                    {
+                        PlayniteApi.Notifications.Remove(notificationId);
+                    }
+                }
+                catch
+                {
+                    // Never let auto-dismiss failure surface to the user.
+                }
+            });
         }
 
         public void NotifyInfo(string message, OperationTiming timing)
